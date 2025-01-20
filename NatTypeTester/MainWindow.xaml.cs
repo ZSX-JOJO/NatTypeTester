@@ -1,49 +1,48 @@
 using Microsoft.Extensions.DependencyInjection;
 using ModernWpf.Controls;
 using NatTypeTester.ViewModels;
+using ReactiveMarbles.ObservableEvents;
 using ReactiveUI;
-using System;
-using System.Linq;
 using System.Reactive.Disposables;
-using System.Reactive.Linq;
 using Volo.Abp.DependencyInjection;
 
-namespace NatTypeTester
+namespace NatTypeTester;
+
+public partial class MainWindow : ISingletonDependency
 {
-	public partial class MainWindow : ISingletonDependency
+	public MainWindow(MainWindowViewModel viewModel, IServiceProvider serviceProvider)
 	{
-		public MainWindow(MainWindowViewModel viewModel, IServiceProvider serviceProvider)
+		InitializeComponent();
+		ViewModel = viewModel;
+
+		this.WhenActivated(d =>
 		{
-			InitializeComponent();
-			ViewModel = viewModel;
+			#region Server
 
-			this.WhenActivated(d =>
-			{
-				#region Server
+			this.Bind(ViewModel,
+				vm => vm.Config.StunServer,
+				v => v.ServersComboBox.Text
+			).DisposeWith(d);
 
-				this.Bind(ViewModel,
-						vm => vm.Config.StunServer,
-						v => v.ServersComboBox.Text
-				).DisposeWith(d);
+			this.OneWayBind(ViewModel,
+				vm => vm.StunServers,
+				v => v.ServersComboBox.ItemsSource
+			).DisposeWith(d);
 
-				this.OneWayBind(ViewModel,
-						vm => vm.StunServers,
-						v => v.ServersComboBox.ItemsSource
-				).DisposeWith(d);
+			#endregion
 
-				#endregion
+			this.OneWayBind(ViewModel, vm => vm.Router, v => v.RoutedViewHost.Router).DisposeWith(d);
 
-				this.Bind(ViewModel, vm => vm.Router, v => v.RoutedViewHost.Router).DisposeWith(d);
-				Observable.FromEventPattern<NavigationViewSelectionChangedEventArgs>(NavigationView, nameof(NavigationView.SelectionChanged))
-				.Subscribe(args =>
+			NavigationView.Events().SelectionChanged
+				.Subscribe(parameter =>
 				{
-					if (args.EventArgs.IsSettingsSelected)
+					if (parameter.args.IsSettingsSelected)
 					{
-						ViewModel.Router.Navigate.Execute(serviceProvider.GetRequiredService<SettingViewModel>());
+						ViewModel.Router.Navigate.Execute(serviceProvider.GetRequiredService<SettingViewModel>()).Subscribe().Dispose();
 						return;
 					}
 
-					if (args.EventArgs.SelectedItem is not NavigationViewItem { Tag: string tag })
+					if (parameter.args.SelectedItem is not NavigationViewItem { Tag: string tag })
 					{
 						return;
 					}
@@ -52,20 +51,19 @@ namespace NatTypeTester
 					{
 						case @"1":
 						{
-							ViewModel.Router.Navigate.Execute(serviceProvider.GetRequiredService<RFC5780ViewModel>());
+							ViewModel.Router.Navigate.Execute(serviceProvider.GetRequiredService<RFC5780ViewModel>()).Subscribe().Dispose();
 							break;
 						}
 						case @"2":
 						{
-							ViewModel.Router.Navigate.Execute(serviceProvider.GetRequiredService<RFC3489ViewModel>());
+							ViewModel.Router.Navigate.Execute(serviceProvider.GetRequiredService<RFC3489ViewModel>()).Subscribe().Dispose();
 							break;
 						}
 					}
 				}).DisposeWith(d);
-				NavigationView.SelectedItem = NavigationView.MenuItems.OfType<NavigationViewItem>().First();
+			NavigationView.SelectedItem = NavigationView.MenuItems.OfType<NavigationViewItem>().First();
 
-				ViewModel.LoadStunServer();
-			});
-		}
+			ViewModel.LoadStunServer();
+		});
 	}
 }

@@ -1,23 +1,61 @@
+using Microsoft;
+using Socks5.Models;
 using STUN.Enums;
-using System;
 using System.Net;
 
-namespace STUN.Proxy
+namespace STUN.Proxy;
+
+public static class ProxyFactory
 {
-	public static class ProxyFactory
+	public static IUdpProxy CreateProxy(ProxyType type, IPEndPoint local, Socks5CreateOption option)
 	{
-		public static IUdpProxy CreateProxy(ProxyType type, IPEndPoint? local, IPEndPoint? proxy, string? user = null, string? password = null)
+		switch (type)
 		{
-			if (proxy is null)
+			case ProxyType.Plain:
 			{
-				throw new ArgumentNullException(nameof(proxy), @"Proxy server is null");
+				return new NoneUdpProxy(local);
 			}
-			return type switch
+			case ProxyType.Socks5:
 			{
-				ProxyType.Plain => new NoneUdpProxy(local),
-				ProxyType.Socks5 => new Socks5UdpProxy(local, proxy, user, password),
-				_ => throw new NotSupportedException(type.ToString())
-			};
+				Requires.NotNull(option, nameof(option));
+				Requires.Argument(option.Address is not null, nameof(option), @"Proxy server is null");
+				return new Socks5UdpProxy(local, option);
+			}
+			default:
+			{
+				throw Assumes.NotReachable();
+			}
+		}
+	}
+
+	public static ITcpProxy CreateProxy(TransportType transport, ProxyType type, Socks5CreateOption option, string targetHost)
+	{
+		switch (transport, type)
+		{
+			case (TransportType.Tcp, ProxyType.Plain):
+			{
+				return new DirectTcpProxy();
+			}
+			case (TransportType.Tcp, ProxyType.Socks5):
+			{
+				Requires.NotNull(option, nameof(option));
+				Requires.Argument(option.Address is not null, nameof(option), @"Proxy server is null");
+				return new Socks5TcpProxy(option);
+			}
+			case (TransportType.Tls, ProxyType.Plain):
+			{
+				return new TlsProxy(targetHost);
+			}
+			case (TransportType.Tls, ProxyType.Socks5):
+			{
+				Requires.NotNull(option, nameof(option));
+				Requires.Argument(option.Address is not null, nameof(option), @"Proxy server is null");
+				return new TlsOverSocks5Proxy(option, targetHost);
+			}
+			default:
+			{
+				throw new NotSupportedException();
+			}
 		}
 	}
 }

@@ -1,71 +1,172 @@
 using Dns.Net.Abstractions;
+using Dns.Net.Clients;
 using JetBrains.Annotations;
+using Microsoft;
 using NatTypeTester.Models;
 using ReactiveUI;
+using Socks5.Models;
+using STUN;
 using STUN.Client;
+using STUN.Enums;
 using STUN.Proxy;
 using STUN.StunResult;
-using STUN.Utils;
-using System;
 using System.Net;
+using System.Net.Sockets;
 using System.Reactive;
 using System.Reactive.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 
-namespace NatTypeTester.ViewModels
+namespace NatTypeTester.ViewModels;
+
+[UsedImplicitly]
+public class RFC5780ViewModel : ViewModelBase, IRoutableViewModel
 {
-	[UsedImplicitly]
-	public class RFC5780ViewModel : ViewModelBase, IRoutableViewModel
+	public string UrlPathSegment => @"RFC5780";
+	public IScreen HostScreen => LazyServiceProvider.LazyGetRequiredService<IScreen>();
+
+	private Config Config => LazyServiceProvider.LazyGetRequiredService<Config>();
+
+	private IDnsClient DnsClient => LazyServiceProvider.LazyGetRequiredService<IDnsClient>();
+	private IDnsClient AAAADnsClient => LazyServiceProvider.LazyGetRequiredService<DefaultAAAAClient>();
+	private IDnsClient ADnsClient => LazyServiceProvider.LazyGetRequiredService<DefaultAClient>();
+
+	private StunResult5389 _result5389;
+	public StunResult5389 Result5389
 	{
-		public string UrlPathSegment => @"RFC5780";
-		public IScreen HostScreen => LazyServiceProvider.LazyGetRequiredService<IScreen>();
+		get => _result5389;
+		set => this.RaiseAndSetIfChanged(ref _result5389, value);
+	}
 
-		private Config Config => LazyServiceProvider.LazyGetRequiredService<Config>();
+	private StunResult5389 _udpResult;
+	private StunResult5389 _tcpResult;
+	private StunResult5389 _tlsResult;
 
-		private IDnsClient DnsClient => LazyServiceProvider.LazyGetRequiredService<IDnsClient>();
+	private TransportType _transportType;
+	public TransportType TransportType
+	{
+		get => _transportType;
+		set => this.RaiseAndSetIfChanged(ref _transportType, value);
+	}
 
-		public StunResult5389 Result5389 { get; set; }
+	public ReactiveCommand<Unit, Unit> DiscoveryNatType { get; }
 
-		public ReactiveCommand<Unit, Unit> DiscoveryNatType { get; }
+	public RFC5780ViewModel()
+	{
+		_udpResult = new StunResult5389();
+		_tcpResult = new StunResult5389();
+		_tlsResult = new StunResult5389();
+		_result5389 = _udpResult;
+		DiscoveryNatType = ReactiveCommand.CreateFromTask(DiscoveryNatTypeAsync);
+	}
 
-		public RFC5780ViewModel()
+	private async Task DiscoveryNatTypeAsync(CancellationToken token)
+	{
+		Verify.Operation(StunServer.TryParse(Config.StunServer, out StunServer? server, TransportType is TransportType.Tls ? StunServer.DefaultTlsPort : StunServer.DefaultPort), @"Wrong STUN Server!");
+
+		if (!HostnameEndpoint.TryParse(Config.ProxyServer, out HostnameEndpoint? proxyIpe))
 		{
-			Result5389 = new StunResult5389 { LocalEndPoint = new IPEndPoint(IPAddress.Any, 0) };
-			DiscoveryNatType = ReactiveCommand.CreateFromTask(DiscoveryNatTypeImpl);
+			throw new NotSupportedException(@"Unknown proxy address");
 		}
 
-		private async Task DiscoveryNatTypeImpl(CancellationToken token)
+		Socks5CreateOption socks5Option = new()
 		{
-			var server = new StunServer();
-			if (!server.Parse(Config.StunServer))
+			Address = await DnsClient.QueryAsync(proxyIpe.Hostname, token),
+			Port = proxyIpe.Port,
+			UsernamePassword = new UsernamePassword
 			{
-				throw new Exception(@"Wrong STUN Server!");
+				UserName = Config.ProxyUser,
+				Password = Config.ProxyPassword
 			}
+		};
 
-			using var proxy = ProxyFactory.CreateProxy(
-					Config.ProxyType,
-					Result5389.LocalEndPoint,
-					IPEndPoint.Parse(Config.ProxyServer),
-					Config.ProxyUser, Config.ProxyPassword
-			);
-
-			using var client = new StunClient5389UDP(DnsClient, server.Hostname, server.Port, Result5389.LocalEndPoint, proxy);
-
-			Result5389 = client.Status;
-			using (Observable.Interval(TimeSpan.FromSeconds(0.1))
-					.ObserveOn(RxApp.MainThreadScheduler)
-					.Subscribe(_ => this.RaisePropertyChanged(nameof(Result5389))))
-			{
-				await client.QueryAsync();
-			}
-
-			var cache = new StunResult5389();
-			cache.Clone(client.Status);
-			cache.LocalEndPoint = client.LocalEndPoint;
-			Result5389 = cache;
-
-			this.RaisePropertyChanged(nameof(Result5389));
+		IPAddress? serverIp;
+		if (Result5389.LocalEndPoint is null)
+		{
+			serverIp = await DnsClient.QueryAsync(server.Hostname, token);
+			Result5389.LocalEndPoint = serverIp.AddressFamily is AddressFamily.InterNetworkV6 ? new IPEndPoint(IPAddress.IPv6Any, IPEndPoint.MinPort) : new IPEndPoint(IPAddress.Any, IPEndPoint.MinPort);
 		}
+		else
+		{
+			if (Result5389.LocalEndPoint.AddressFamily is AddressFamily.InterNetworkV6)
+			{
+				serverIp = await AAAADnsClient.QueryAsync(server.Hostname, token);
+			}
+			else
+			{
+				serverIp = await ADnsClient.QueryAsync(server.Hostname, token);
+			}
+		}
+
+		TransportType transport = TransportType;
+		if (transport is TransportType.Udp)
+		{
+			using IUdpProxy proxy = ProxyFactory.CreateProxy(Config.ProxyType, Result5389.LocalEndPoint, socks5Option);
+			using StunClient5389UDP client = new(new IPEndPoint(serverIp, server.Port), Result5389.LocalEndPoint, proxy);
+
+			try
+			{
+				using (Observable.Interval(TimeSpan.FromSeconds(0.1))
+						.ObserveOn(RxApp.MainThreadScheduler)
+						// ReSharper disable once AccessToDisposedClosure
+						.Subscribe(_ => Result5389 = _udpResult = client.State with { }))
+				{
+					await client.ConnectProxyAsync(token);
+					try
+					{
+						await client.QueryAsync(token);
+					}
+					finally
+					{
+						await client.CloseProxyAsync(token);
+					}
+				}
+			}
+			finally
+			{
+				Result5389 = _udpResult = client.State with { };
+			}
+		}
+		else
+		{
+			using ITcpProxy proxy = ProxyFactory.CreateProxy(transport, Config.ProxyType, socks5Option, server.Hostname);
+			using IStunClient5389 client = new StunClient5389TCP(new IPEndPoint(serverIp, server.Port), Result5389.LocalEndPoint, proxy);
+
+			try
+			{
+				using (Observable.Interval(TimeSpan.FromSeconds(0.1))
+						.ObserveOn(RxApp.MainThreadScheduler)
+						.Subscribe(_ => UpdateData()))
+				{
+					await client.QueryAsync(token);
+				}
+			}
+			finally
+			{
+				UpdateData();
+			}
+
+			void UpdateData()
+			{
+				// ReSharper disable once AccessToDisposedClosure
+				Result5389 = client.State with { };
+				if (transport is TransportType.Tcp)
+				{
+					_tcpResult = Result5389;
+				}
+				else
+				{
+					_tlsResult = Result5389;
+				}
+			}
+		}
+	}
+
+	public void ResetResult()
+	{
+		Result5389 = TransportType switch
+		{
+			TransportType.Tcp => _tcpResult,
+			TransportType.Tls => _tlsResult,
+			_ => _udpResult
+		};
 	}
 }
