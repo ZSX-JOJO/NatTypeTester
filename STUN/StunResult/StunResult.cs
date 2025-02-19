@@ -1,10 +1,9 @@
 using System.Net;
 
-namespace STUN.StunResult
+namespace STUN.StunResult;
+
+public abstract record StunResult
 {
-	public abstract class StunResult
-	{
-		public IPEndPoint? PublicEndPoint { get; set; }
-		public IPEndPoint? LocalEndPoint { get; set; }
-	}
+	public IPEndPoint? PublicEndPoint { get; set; }
+	public IPEndPoint? LocalEndPoint { get; set; }
 }

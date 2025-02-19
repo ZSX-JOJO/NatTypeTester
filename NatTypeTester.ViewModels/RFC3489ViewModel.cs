@@ -1,68 +1,111 @@
 using Dns.Net.Abstractions;
+using Dns.Net.Clients;
 using JetBrains.Annotations;
+using Microsoft;
 using NatTypeTester.Models;
 using ReactiveUI;
+using Socks5.Models;
+using STUN;
 using STUN.Client;
 using STUN.Proxy;
 using STUN.StunResult;
-using STUN.Utils;
-using System;
 using System.Net;
+using System.Net.Sockets;
 using System.Reactive;
 using System.Reactive.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 
-namespace NatTypeTester.ViewModels
+namespace NatTypeTester.ViewModels;
+
+[UsedImplicitly]
+public class RFC3489ViewModel : ViewModelBase, IRoutableViewModel
 {
-	[UsedImplicitly]
-	public class RFC3489ViewModel : ViewModelBase, IRoutableViewModel
+	public string UrlPathSegment => @"RFC3489";
+	public IScreen HostScreen => LazyServiceProvider.LazyGetRequiredService<IScreen>();
+
+	private Config Config => LazyServiceProvider.LazyGetRequiredService<Config>();
+
+	private IDnsClient DnsClient => LazyServiceProvider.LazyGetRequiredService<IDnsClient>();
+	private IDnsClient AAAADnsClient => LazyServiceProvider.LazyGetRequiredService<DefaultAAAAClient>();
+	private IDnsClient ADnsClient => LazyServiceProvider.LazyGetRequiredService<DefaultAClient>();
+
+	private ClassicStunResult _result3489;
+	public ClassicStunResult Result3489
 	{
-		public string UrlPathSegment => @"RFC3489";
-		public IScreen HostScreen => LazyServiceProvider.LazyGetRequiredService<IScreen>();
+		get => _result3489;
+		set => this.RaiseAndSetIfChanged(ref _result3489, value);
+	}
 
-		private Config Config => LazyServiceProvider.LazyGetRequiredService<Config>();
+	public ReactiveCommand<Unit, Unit> TestClassicNatType { get; }
 
-		private IDnsClient DnsClient => LazyServiceProvider.LazyGetRequiredService<IDnsClient>();
+	public RFC3489ViewModel()
+	{
+		_result3489 = new ClassicStunResult();
+		TestClassicNatType = ReactiveCommand.CreateFromTask(TestClassicNatTypeAsync);
+	}
 
-		public ClassicStunResult Result3489 { get; set; }
+	private async Task TestClassicNatTypeAsync(CancellationToken token)
+	{
+		Verify.Operation(StunServer.TryParse(Config.StunServer, out StunServer? server), @"Wrong STUN Server!");
 
-		public ReactiveCommand<Unit, Unit> TestClassicNatType { get; }
-
-		public RFC3489ViewModel()
+		if (!HostnameEndpoint.TryParse(Config.ProxyServer, out HostnameEndpoint? proxyIpe))
 		{
-			Result3489 = new ClassicStunResult { LocalEndPoint = new IPEndPoint(IPAddress.Any, 0) };
-			TestClassicNatType = ReactiveCommand.CreateFromTask(TestClassicNatTypeImpl);
+			throw new NotSupportedException(@"Unknown proxy address");
 		}
 
-		private async Task TestClassicNatTypeImpl(CancellationToken token)
+		Socks5CreateOption socks5Option = new()
 		{
-			var server = new StunServer();
-			if (!server.Parse(Config.StunServer))
+			Address = await DnsClient.QueryAsync(proxyIpe.Hostname, token),
+			Port = proxyIpe.Port,
+			UsernamePassword = new UsernamePassword
 			{
-				throw new Exception(@"Wrong STUN Server!");
+				UserName = Config.ProxyUser,
+				Password = Config.ProxyPassword
 			}
+		};
 
-			using var proxy = ProxyFactory.CreateProxy(
-					Config.ProxyType,
-					Result3489.LocalEndPoint,
-					IPEndPoint.Parse(Config.ProxyServer),
-					Config.ProxyUser, Config.ProxyPassword
-			);
+		IPAddress? serverIp;
+		if (Result3489.LocalEndPoint is null)
+		{
+			serverIp = await DnsClient.QueryAsync(server.Hostname, token);
+			Result3489.LocalEndPoint = serverIp.AddressFamily is AddressFamily.InterNetworkV6 ? new IPEndPoint(IPAddress.IPv6Any, IPEndPoint.MinPort) : new IPEndPoint(IPAddress.Any, IPEndPoint.MinPort);
+		}
+		else
+		{
+			if (Result3489.LocalEndPoint.AddressFamily is AddressFamily.InterNetworkV6)
+			{
+				serverIp = await AAAADnsClient.QueryAsync(server.Hostname, token);
+			}
+			else
+			{
+				serverIp = await ADnsClient.QueryAsync(server.Hostname, token);
+			}
+		}
 
-			using var client = new StunClient3489(DnsClient, server.Hostname, server.Port, Result3489.LocalEndPoint, proxy);
+		using IUdpProxy proxy = ProxyFactory.CreateProxy(Config.ProxyType, Result3489.LocalEndPoint, socks5Option);
 
-			Result3489 = client.Status;
+		using StunClient3489 client = new(new IPEndPoint(serverIp, server.Port), Result3489.LocalEndPoint, proxy);
+
+		try
+		{
 			using (Observable.Interval(TimeSpan.FromSeconds(0.1))
 					.ObserveOn(RxApp.MainThreadScheduler)
-					.Subscribe(_ => this.RaisePropertyChanged(nameof(Result3489))))
+					// ReSharper disable once AccessToDisposedClosure
+					.Subscribe(_ => Result3489 = client.State with { }))
 			{
-				await client.Query3489Async();
+				await client.ConnectProxyAsync(token);
+				try
+				{
+					await client.QueryAsync(token);
+				}
+				finally
+				{
+					await client.CloseProxyAsync(token);
+				}
 			}
-
-			Result3489.LocalEndPoint = client.LocalEndPoint;
-
-			this.RaisePropertyChanged(nameof(Result3489));
+		}
+		finally
+		{
+			Result3489 = client.State with { };
 		}
 	}
 }

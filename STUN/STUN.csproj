@@ -6,18 +6,22 @@
     <NoWarn>CS1591</NoWarn>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-    <Copyright>Copyright © 2018 - 2021 HMBSbige</Copyright>
+    <Copyright>Copyright © 2018-2024 HMBSbige</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/HMBSbige/NatTypeTester</PackageProjectUrl>
     <RepositoryUrl>https://github.com/HMBSbige/NatTypeTester</RepositoryUrl>
-    <PackageTags>stun;nat;rfc3489;rfc5389</PackageTags>
-    <Version>1.0.0</Version>
+    <PackageTags>stun;nat;rfc3489;rfc5389;rfc5780;rfc8489</PackageTags>
+    <Version>8.0.2</Version>
     <PackageId>Stun.Net</PackageId>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Dns.Net.Abstractions" Version="0.1.0" />
-    <PackageReference Include="Microsoft.VisualStudio.Validation" Version="16.10.34" />
+    <None Include="../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Socks5" Version="1.0.2" />
   </ItemGroup>
 
 </Project>
